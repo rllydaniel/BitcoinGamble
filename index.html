@@ -412,7 +412,7 @@
             'wss://stream.binance.us:9443/ws/btcusdt@trade',
         ];
         const BIG_TRADE_USD = 50000;
-        const REFRESH_MS    = 15000;
+        const REFRESH_MS    = 10000;
 
         // ── State ──
         let currentPrice = null;
@@ -443,11 +443,17 @@
         }
 
         // ── Binance REST: Klines for indicators ──
+        let klines5m = [];
         async function fetchKlines() {
             const base = await findWorkingAPI();
-            const res = await fetch(`${base}/klines?symbol=BTCUSDT&interval=1h&limit=100`);
-            if (!res.ok) throw new Error(`Klines request failed: ${res.status}`);
-            klines = await res.json();
+            const [res1h, res5m] = await Promise.all([
+                fetch(`${base}/klines?symbol=BTCUSDT&interval=1h&limit=100`),
+                fetch(`${base}/klines?symbol=BTCUSDT&interval=5m&limit=60`)
+            ]);
+            if (!res1h.ok) throw new Error(`Klines 1h failed: ${res1h.status}`);
+            if (!res5m.ok) throw new Error(`Klines 5m failed: ${res5m.status}`);
+            klines = await res1h.json();
+            klines5m = await res5m.json();
             return klines;
         }
 
@@ -472,6 +478,16 @@
             return big;
         }
 
+        // ── EMA series calculator ──
+        function calcEMASeries(data, period) {
+            const k = 2 / (period + 1);
+            const result = [data[0]];
+            for (let i = 1; i < data.length; i++) {
+                result.push(data[i] * k + result[i - 1] * (1 - k));
+            }
+            return result;
+        }
+
         // ── Compute indicators from klines ──
         function computeIndicators(klines) {
             const closes = klines.map(k => parseFloat(k[4]));
@@ -483,29 +499,44 @@
             const sma20 = closes.slice(-20).reduce((a, b) => a + b, 0) / 20;
             const sma50 = closes.slice(-50).reduce((a, b) => a + b, 0) / 50;
 
-            // RSI (14-period)
+            // RSI (14-period, Wilder's smoothing)
             const rsiPeriod = 14;
-            let gains = 0, losses = 0;
-            for (let i = closes.length - rsiPeriod; i < closes.length; i++) {
+            let avgGain = 0, avgLoss = 0;
+            for (let i = 1; i <= rsiPeriod; i++) {
                 const diff = closes[i] - closes[i - 1];
-                if (diff > 0) gains += diff;
-                else losses -= diff;
+                if (diff > 0) avgGain += diff; else avgLoss -= diff;
             }
-            const avgGain = gains / rsiPeriod;
-            const avgLoss = losses / rsiPeriod;
+            avgGain /= rsiPeriod;
+            avgLoss /= rsiPeriod;
+            for (let i = rsiPeriod + 1; i < closes.length; i++) {
+                const diff = closes[i] - closes[i - 1];
+                const gain = diff > 0 ? diff : 0;
+                const loss = diff < 0 ? -diff : 0;
+                avgGain = (avgGain * (rsiPeriod - 1) + gain) / rsiPeriod;
+                avgLoss = (avgLoss * (rsiPeriod - 1) + loss) / rsiPeriod;
+            }
             const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
             const rsi = 100 - (100 / (1 + rs));
 
-            // MACD
-            const ema = (data, period) => {
-                const k = 2 / (period + 1);
-                let e = data[0];
-                for (let i = 1; i < data.length; i++) e = data[i] * k + e * (1 - k);
-                return e;
-            };
-            const ema12 = ema(closes, 12);
-            const ema26 = ema(closes, 26);
-            const macd = ema12 - ema26;
+            // MACD (12, 26, 9) — full series for signal line
+            const ema12Series = calcEMASeries(closes, 12);
+            const ema26Series = calcEMASeries(closes, 26);
+            const macdSeries = ema12Series.map((v, i) => v - ema26Series[i]);
+            const signalSeries = calcEMASeries(macdSeries, 9);
+            const macdLine = macdSeries[macdSeries.length - 1];
+            const signalLine = signalSeries[signalSeries.length - 1];
+            const macdHist = macdLine - signalLine;
+            // Previous histogram for direction
+            const prevMacdHist = macdSeries[macdSeries.length - 2] - signalSeries[signalSeries.length - 2];
+            const macdRising = macdHist > prevMacdHist;
+
+            // Bollinger Bands (20, 2)
+            const bb20 = closes.slice(-20);
+            const bbMean = bb20.reduce((a, b) => a + b, 0) / 20;
+            const bbStd = Math.sqrt(bb20.reduce((a, b) => a + (b - bbMean) ** 2, 0) / 20);
+            const bbUpper = bbMean + 2 * bbStd;
+            const bbLower = bbMean - 2 * bbStd;
+            const bbWidth = (bbUpper - bbLower) / bbMean * 100;
 
             // Volatility (std dev of last 20 hourly returns)
             const returns = [];
@@ -525,86 +556,147 @@
             // 24h volume
             const vol24h = volumes.slice(-24).reduce((a, b) => a + b, 0);
 
-            return { sma20, sma50, rsi, macd, volatility, support, resistance, vol24h, closes };
+            // 5m klines for short-term momentum
+            const closes5m = klines5m.map(k => parseFloat(k[4]));
+            const shortMomentum = closes5m.length >= 12
+                ? (closes5m[closes5m.length - 1] - closes5m[closes5m.length - 12]) / closes5m[closes5m.length - 12]
+                : 0; // last 1 hour of 5m candles
+
+            return {
+                sma20, sma50, rsi, macd: macdLine, macdSignal: signalLine,
+                macdHist, macdRising, volatility, support, resistance,
+                vol24h, closes, bbUpper, bbLower, bbWidth, shortMomentum, closes5m
+            };
         }
 
         // ── Determine signal ──
         function getSignal(price, ind) {
             let score = 0;
+            const reasons = [];
 
             // SMA crossover
-            if (ind.sma20 > ind.sma50) score += 1; else score -= 1;
+            if (ind.sma20 > ind.sma50) { score += 1; reasons.push('SMA20 > SMA50'); }
+            else { score -= 1; reasons.push('SMA20 < SMA50'); }
+
             // Price vs SMA20
             if (price > ind.sma20) score += 1; else score -= 1;
-            // RSI
-            if (ind.rsi < 30) score += 2;       // oversold = buy
-            else if (ind.rsi > 70) score -= 2;  // overbought = sell
-            // MACD
-            if (ind.macd > 0) score += 1; else score -= 1;
 
-            if (score >= 2) return { signal: 'BUY', reason: 'Bullish momentum — price above key averages, positive MACD' };
-            if (score <= -2) return { signal: 'SELL', reason: 'Bearish momentum — price below key averages, negative MACD' };
-            return { signal: 'HOLD', reason: 'Mixed signals — wait for clearer trend confirmation' };
+            // RSI zones
+            if (ind.rsi < 30) { score += 2; reasons.push('RSI oversold'); }
+            else if (ind.rsi > 70) { score -= 2; reasons.push('RSI overbought'); }
+            else if (ind.rsi < 45) { score += 0.5; }
+            else if (ind.rsi > 55) { score -= 0.5; }
+
+            // MACD line vs signal
+            if (ind.macd > ind.macdSignal) score += 1; else score -= 1;
+
+            // MACD histogram direction (momentum accelerating?)
+            if (ind.macdRising) { score += 0.5; reasons.push('MACD accelerating'); }
+            else { score -= 0.5; reasons.push('MACD decelerating'); }
+
+            // Bollinger Band position
+            if (price < ind.bbLower) { score += 1; reasons.push('below lower Bollinger'); }
+            else if (price > ind.bbUpper) { score -= 1; reasons.push('above upper Bollinger'); }
+
+            // Short-term 5m momentum
+            if (ind.shortMomentum > 0.002) { score += 1; reasons.push('short-term momentum up'); }
+            else if (ind.shortMomentum < -0.002) { score -= 1; reasons.push('short-term momentum down'); }
+
+            const direction = score >= 0 ? 'up' : 'down';
+            const topReasons = reasons.slice(0, 3).join(', ');
+
+            if (score >= 2.5) return { signal: 'BUY', reason: `Strong bullish — ${topReasons}`, score, direction };
+            if (score >= 1) return { signal: 'BUY', reason: `Leaning bullish — ${topReasons}`, score, direction };
+            if (score <= -2.5) return { signal: 'SELL', reason: `Strong bearish — ${topReasons}`, score, direction };
+            if (score <= -1) return { signal: 'SELL', reason: `Leaning bearish — ${topReasons}`, score, direction };
+            return { signal: 'HOLD', reason: `Neutral — ${topReasons}`, score, direction };
+        }
+
+        // ── Linear regression helper ──
+        function linReg(data) {
+            const n = data.length;
+            let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+            for (let i = 0; i < n; i++) {
+                sumX += i; sumY += data[i];
+                sumXY += i * data[i]; sumX2 += i * i;
+            }
+            const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+            const intercept = (sumY - slope * sumX) / n;
+            // R-squared for confidence
+            const meanY = sumY / n;
+            let ssTot = 0, ssRes = 0;
+            for (let i = 0; i < n; i++) {
+                const predicted = intercept + slope * i;
+                ssTot += (data[i] - meanY) ** 2;
+                ssRes += (data[i] - predicted) ** 2;
+            }
+            const r2 = ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+            return { slope, intercept, r2 };
         }
 
         // ── Price prediction engine ──
         function predictPrice(price, ind) {
-            const closes = ind.closes;
-            const len = closes.length;
+            // 1) Short-term trend from 5m candles (last 60 = 5 hours)
+            const reg5m = linReg(ind.closes5m);
+            // Slope per 5m candle → per hour (x12)
+            const shortTrend = (reg5m.slope / price) * 12;
 
-            // Linear regression on last 24 hourly closes for short-term trend
-            const recent = closes.slice(-24);
-            const n = recent.length;
-            let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
-            for (let i = 0; i < n; i++) {
-                sumX += i; sumY += recent[i];
-                sumXY += i * recent[i]; sumX2 += i * i;
-            }
-            const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
-            const intercept = (sumY - slope * sumX) / n;
+            // 2) Medium-term trend from 1h candles (last 24)
+            const reg1h = linReg(ind.closes.slice(-24));
+            const medTrend = reg1h.slope / price;
 
-            // Hourly slope as base momentum
-            const hourlyDrift = slope;
+            // 3) Long-term from 1h candles (all ~100)
+            const reg100h = linReg(ind.closes);
+            const longTrend = reg100h.slope / price;
 
-            // Adjust with RSI mean-reversion pressure
+            // 4) RSI mean-reversion pressure (stronger at extremes)
             let rsiAdj = 0;
-            if (ind.rsi > 70) rsiAdj = -0.0015 * (ind.rsi - 70); // overbought pulls down
-            else if (ind.rsi < 30) rsiAdj = 0.0015 * (30 - ind.rsi); // oversold pulls up
+            if (ind.rsi > 70) rsiAdj = -0.001 * ((ind.rsi - 70) / 30);
+            else if (ind.rsi < 30) rsiAdj = 0.001 * ((30 - ind.rsi) / 30);
+            // Moderate pressure in mid zones
+            else if (ind.rsi > 60) rsiAdj = -0.0002;
+            else if (ind.rsi < 40) rsiAdj = 0.0002;
 
-            // MACD momentum factor
-            const macdAdj = ind.macd > 0 ? 0.0002 : -0.0002;
+            // 5) MACD histogram momentum
+            const macdAdj = ind.macdHist / price * 0.1;
 
-            // SMA trend alignment bonus
-            const trendBonus = (ind.sma20 > ind.sma50) ? 0.0003 : -0.0003;
+            // 6) Bollinger reversion — price near bands pulls back
+            let bbAdj = 0;
+            const bbPos = (price - ind.bbLower) / (ind.bbUpper - ind.bbLower); // 0 to 1
+            if (bbPos > 0.9) bbAdj = -0.0005 * (bbPos - 0.9) / 0.1;
+            else if (bbPos < 0.1) bbAdj = 0.0005 * (0.1 - bbPos) / 0.1;
 
-            // Combined hourly expected move
-            const hourlyPct = (hourlyDrift / price) + rsiAdj + macdAdj + trendBonus;
+            // Weighted combination: short-term weighted most for 1h prediction
+            const hourlyPct = shortTrend * 0.45 + medTrend * 0.30 + longTrend * 0.05 + rsiAdj + macdAdj + bbAdj;
 
-            // Predict future prices
+            // Predict with diminishing extrapolation for longer timeframes
             const pred1h  = price * (1 + hourlyPct);
-            const pred4h  = price * (1 + hourlyPct * 3.2); // diminishing factor
-            const pred24h = price * (1 + hourlyPct * 12);   // more diminishing
+            const pred4h  = price * (1 + hourlyPct * 2.8); // sqrt-time scaling
+            const pred24h = price * (1 + hourlyPct * 7.5);
 
-            // Confidence based on trend consistency + volatility
-            const trendConsistent = (ind.sma20 > ind.sma50 && ind.macd > 0) || (ind.sma20 < ind.sma50 && ind.macd < 0);
-            let confidence = 50;
-            if (trendConsistent) confidence += 15;
-            if (ind.rsi > 40 && ind.rsi < 60) confidence += 10; // neutral RSI = more predictable
-            if (ind.volatility < 0.5) confidence += 15;
-            else if (ind.volatility > 1.5) confidence -= 15;
-            // Clamp
-            confidence = Math.max(20, Math.min(90, confidence));
+            // Direction clarity
+            const direction = hourlyPct >= 0 ? 'up' : 'down';
 
-            // Price range (based on volatility)
-            const rangePct = ind.volatility * 2.5 / 100; // ~2.5x volatility for 1h range
-            const low1h  = pred1h * (1 - rangePct);
-            const high1h = pred1h * (1 + rangePct);
+            // Confidence from R² of short-term regression + indicator agreement
+            let confidence = Math.round(reg5m.r2 * 40 + reg1h.r2 * 20); // up to 60 from R²
+            const trendAgree = (shortTrend > 0 && medTrend > 0) || (shortTrend < 0 && medTrend < 0);
+            if (trendAgree) confidence += 15;
+            const macdAgree = (ind.macdHist > 0 && hourlyPct > 0) || (ind.macdHist < 0 && hourlyPct < 0);
+            if (macdAgree) confidence += 10;
+            if (ind.rsi > 35 && ind.rsi < 65) confidence += 5; // mid-RSI = more predictable
+            if (ind.volatility > 2) confidence -= 10;
+            confidence = Math.max(15, Math.min(90, confidence));
 
-            // Action plan for next hour
+            // Price range from recent volatility
+            const rangePct = ind.volatility * 3 / 100;
+            const low1h  = Math.min(pred1h, price) * (1 - rangePct);
+            const high1h = Math.max(pred1h, price) * (1 + rangePct);
+
+            // Action plan
             const { signal } = getSignal(price, ind);
             const actions = generateActionPlan(price, pred1h, signal, ind);
 
-            return { pred1h, pred4h, pred24h, confidence, low1h, high1h, actions, hourlyPct };
+            return { pred1h, pred4h, pred24h, confidence, low1h, high1h, actions, hourlyPct, direction };
         }
 
         function generateActionPlan(price, pred1h, signal, ind) {
@@ -646,9 +738,12 @@
             const chgText = (v) => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
             const confColor = pred.confidence >= 65 ? '#3fb950' : pred.confidence >= 45 ? '#d29922' : '#f85149';
 
+            const arrow = pred.direction === 'up' ? '&#9650;' : '&#9660;';
+            const dirLabel = pred.direction === 'up' ? 'UP' : 'DOWN';
+
             el.innerHTML = `
                 <div class="prediction-hero">
-                    <div class="pred-label">1-Hour Predicted Price</div>
+                    <div class="pred-label">1-Hour Predicted Price &mdash; Trending ${arrow} ${dirLabel}</div>
                     <div class="pred-price" style="color: ${chgColor(change1h)}">$${fmt(pred.pred1h)}</div>
                     <div class="pred-change" style="color: ${chgColor(change1h)}">${chgText(change1h)} from current $${fmt(price)}</div>
                 </div>
@@ -745,22 +840,24 @@
         }
 
         function renderSignal(price, ind) {
-            const { signal, reason } = getSignal(price, ind);
+            const { signal, reason, direction } = getSignal(price, ind);
             const el = document.getElementById('signal-banner');
             el.className = 'signal-banner ' + (signal === 'BUY' ? 'signal-buy' : signal === 'SELL' ? 'signal-sell' : 'signal-neutral');
-            el.innerHTML = `${signal === 'BUY' ? 'BUY' : signal === 'SELL' ? 'SELL' : 'HOLD'} SIGNAL &mdash; ${reason}`;
+            const arrow = direction === 'up' ? '&#9650;' : '&#9660;';
+            el.innerHTML = `${arrow} ${signal} SIGNAL &mdash; ${reason}`;
         }
 
         function renderIndicators(ind) {
             const el = document.getElementById('indicators');
+            const histArrow = ind.macdRising ? '&#9650;' : '&#9660;';
             el.innerHTML = `
                 <div class="indicator">
                     <div class="indicator-label">RSI (14)</div>
                     <div class="indicator-value" style="color:${ind.rsi > 70 ? '#f85149' : ind.rsi < 30 ? '#3fb950' : '#e6edf3'}">${ind.rsi.toFixed(1)}</div>
                 </div>
                 <div class="indicator">
-                    <div class="indicator-label">MACD</div>
-                    <div class="indicator-value" style="color:${ind.macd > 0 ? '#3fb950' : '#f85149'}">${ind.macd.toFixed(2)}</div>
+                    <div class="indicator-label">MACD Histogram ${histArrow}</div>
+                    <div class="indicator-value" style="color:${ind.macdHist > 0 ? '#3fb950' : '#f85149'}">${ind.macdHist.toFixed(2)}</div>
                 </div>
                 <div class="indicator">
                     <div class="indicator-label">SMA 20</div>
@@ -773,6 +870,14 @@
                 <div class="indicator">
                     <div class="indicator-label">Volatility</div>
                     <div class="indicator-value">${ind.volatility.toFixed(2)}%</div>
+                </div>
+                <div class="indicator">
+                    <div class="indicator-label">BB Width</div>
+                    <div class="indicator-value">${ind.bbWidth.toFixed(2)}%</div>
+                </div>
+                <div class="indicator">
+                    <div class="indicator-label">5m Momentum</div>
+                    <div class="indicator-value" style="color:${ind.shortMomentum > 0 ? '#3fb950' : '#f85149'}">${(ind.shortMomentum * 100).toFixed(3)}%</div>
                 </div>
                 <div class="indicator">
                     <div class="indicator-label">24h Volume</div>
