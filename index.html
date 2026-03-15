@@ -340,6 +340,178 @@
         .range-low { color: #f85149; }
         .range-high { color: #3fb950; }
 
+        /* Trade entries */
+        .trade-entry {
+            background: #0d1117;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 8px;
+        }
+
+        .trade-entry:last-child { margin-bottom: 0; }
+
+        .trade-entry-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .trade-entry-type {
+            font-weight: 700;
+            font-size: 14px;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        .type-long { background: rgba(35,134,54,0.2); color: #3fb950; }
+        .type-short { background: rgba(218,54,51,0.2); color: #f85149; }
+
+        .trade-entry-conf {
+            font-size: 11px;
+            color: #8b949e;
+        }
+
+        .trade-entry-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 6px;
+            font-size: 12px;
+        }
+
+        .te-item {
+            text-align: center;
+        }
+
+        .te-label {
+            color: #8b949e;
+            font-size: 10px;
+            text-transform: uppercase;
+        }
+
+        .te-value {
+            font-family: monospace;
+            font-weight: 600;
+            font-size: 14px;
+            margin-top: 1px;
+        }
+
+        /* Granular predictions */
+        .granular-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+        }
+
+        .gran-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 10px;
+            background: #0d1117;
+            border-radius: 5px;
+            font-size: 13px;
+        }
+
+        .gran-price { font-family: monospace; font-weight: 600; }
+
+        .gran-verdict {
+            font-size: 11px;
+            font-weight: 700;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+
+        .gv-above { background: rgba(35,134,54,0.2); color: #3fb950; }
+        .gv-below { background: rgba(218,54,51,0.2); color: #f85149; }
+        .gv-at { background: rgba(187,128,9,0.2); color: #d29922; }
+
+        /* Price checker */
+        .price-checker {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .price-checker input {
+            flex: 1;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 10px 12px;
+            color: #e6edf3;
+            font-size: 16px;
+            font-family: monospace;
+            outline: none;
+        }
+
+        .price-checker input:focus { border-color: #f0b90b; }
+
+        .price-checker input::placeholder { color: #484f58; }
+
+        .price-checker button {
+            background: #f0b90b;
+            color: #0d1117;
+            border: none;
+            border-radius: 6px;
+            padding: 10px 16px;
+            font-weight: 700;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .price-checker button:hover { background: #d4a30a; }
+
+        .checker-result {
+            background: #0d1117;
+            border-radius: 6px;
+            padding: 14px;
+            display: none;
+        }
+
+        .checker-result.visible { display: block; }
+
+        .checker-verdict-big {
+            font-size: 20px;
+            font-weight: 800;
+            margin-bottom: 6px;
+        }
+
+        .checker-details {
+            font-size: 13px;
+            color: #8b949e;
+            line-height: 1.6;
+        }
+
+        .checker-details strong { color: #e6edf3; }
+
+        .checker-tf-row {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .checker-tf {
+            flex: 1;
+            text-align: center;
+            background: #161b22;
+            border-radius: 4px;
+            padding: 6px;
+        }
+
+        .checker-tf-label {
+            font-size: 10px;
+            color: #8b949e;
+            text-transform: uppercase;
+        }
+
+        .checker-tf-val {
+            font-size: 13px;
+            font-weight: 700;
+            font-family: monospace;
+            margin-top: 1px;
+        }
+
         /* Last updated */
         #last-updated {
             text-align: center;
@@ -373,6 +545,25 @@
         <div class="card full-width">
             <h2>Price Prediction</h2>
             <div id="prediction"><div class="loading">Loading...</div></div>
+        </div>
+
+        <div class="card full-width">
+            <h2>Check Any Price</h2>
+            <div class="price-checker">
+                <input type="number" id="price-input" placeholder="Enter a price, e.g. 71150" step="1">
+                <button onclick="checkPrice()">Check</button>
+            </div>
+            <div id="checker-result" class="checker-result"></div>
+        </div>
+
+        <div class="card">
+            <h2>Long / Short Entries</h2>
+            <div id="trade-entries"><div class="loading">Loading...</div></div>
+        </div>
+
+        <div class="card">
+            <h2>Granular Predictions</h2>
+            <div id="granular-preds"><div class="loading">Loading...</div></div>
         </div>
 
         <div class="card">
@@ -726,8 +917,7 @@
         }
 
         // ── Render prediction ──
-        function renderPrediction(price, ind) {
-            const pred = predictPrice(price, ind);
+        function renderPrediction(price, ind, pred) {
             const el = document.getElementById('prediction');
 
             const change1h  = ((pred.pred1h - price) / price) * 100;
@@ -787,6 +977,223 @@
                         <div class="action-step">
                             <div class="action-icon action-icon-${a.icon}">${a.icon === 'buy' ? 'B' : a.icon === 'sell' ? 'S' : a.icon === 'hold' ? 'H' : 'i'}</div>
                             <div class="action-text">${a.text}</div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        // ── Long/Short entry calculator ──
+        function calcTradeEntries(price, ind, pred) {
+            const entries = [];
+            const volBuffer = price * ind.volatility / 100;
+
+            // LONG entry
+            const longEntry = price; // enter at current if bullish
+            const longStop = Math.max(ind.support, price - volBuffer * 2);
+            const longTarget = Math.min(ind.resistance, pred.pred1h + volBuffer);
+            const longRR = (longTarget - longEntry) / (longEntry - longStop);
+            const longConf = pred.direction === 'up' ? (pred.confidence + 10) : (pred.confidence - 15);
+
+            entries.push({
+                type: 'LONG',
+                entry: longEntry,
+                stop: longStop,
+                target: longTarget,
+                rr: longRR,
+                conf: Math.max(10, Math.min(95, longConf)),
+                reason: pred.direction === 'up'
+                    ? `Trend is up, predicted $${fmt(pred.pred1h)} in 1h`
+                    : `Against trend — only if price bounces off $${fmt(ind.support)}`
+            });
+
+            // SHORT entry
+            const shortEntry = price;
+            const shortStop = Math.min(ind.resistance, price + volBuffer * 2);
+            const shortTarget = Math.max(ind.support, pred.pred1h - volBuffer);
+            const shortRR = (shortEntry - shortTarget) / (shortStop - shortEntry);
+            const shortConf = pred.direction === 'down' ? (pred.confidence + 10) : (pred.confidence - 15);
+
+            entries.push({
+                type: 'SHORT',
+                entry: shortEntry,
+                stop: shortStop,
+                target: shortTarget,
+                rr: shortRR,
+                conf: Math.max(10, Math.min(95, shortConf)),
+                reason: pred.direction === 'down'
+                    ? `Trend is down, predicted $${fmt(pred.pred1h)} in 1h`
+                    : `Against trend — only if price rejects $${fmt(ind.resistance)}`
+            });
+
+            return entries;
+        }
+
+        function renderTradeEntries(price, ind, pred) {
+            const entries = calcTradeEntries(price, ind, pred);
+            const el = document.getElementById('trade-entries');
+            el.innerHTML = entries.map(e => {
+                const isLong = e.type === 'LONG';
+                const favored = (isLong && pred.direction === 'up') || (!isLong && pred.direction === 'down');
+                return `<div class="trade-entry" style="${favored ? '' : 'opacity:0.6'}">
+                    <div class="trade-entry-header">
+                        <span class="trade-entry-type ${isLong ? 'type-long' : 'type-short'}">${e.type} ${favored ? '(Favored)' : ''}</span>
+                        <span class="trade-entry-conf">${e.conf}% conf / ${e.rr.toFixed(1)}:1 R:R</span>
+                    </div>
+                    <div class="trade-entry-grid">
+                        <div class="te-item">
+                            <div class="te-label">Entry</div>
+                            <div class="te-value" style="color:#e6edf3">$${fmt(e.entry)}</div>
+                        </div>
+                        <div class="te-item">
+                            <div class="te-label">Stop Loss</div>
+                            <div class="te-value" style="color:#f85149">$${fmt(e.stop)}</div>
+                        </div>
+                        <div class="te-item">
+                            <div class="te-label">Target</div>
+                            <div class="te-value" style="color:#3fb950">$${fmt(e.target)}</div>
+                        </div>
+                    </div>
+                    <div style="font-size:11px;color:#8b949e;margin-top:6px">${e.reason}</div>
+                </div>`;
+            }).join('');
+        }
+
+        // ── Granular predictions (small increments around current price) ──
+        function renderGranularPreds(price, ind, pred) {
+            const el = document.getElementById('granular-preds');
+
+            // Generate price levels at $250 and $500 increments around current price
+            const levels = [];
+            const steps = [250, 500, 750, 1000, 1500, 2000];
+            for (const s of steps) {
+                const above = Math.round((price + s) / 50) * 50; // round to nearest $50
+                const below = Math.round((price - s) / 50) * 50;
+                if (!levels.find(l => l === above)) levels.push(above);
+                if (!levels.find(l => l === below)) levels.push(below);
+            }
+            levels.sort((a, b) => b - a);
+
+            el.innerHTML = '<div class="granular-grid">' + levels.map(target => {
+                const diff = target - price;
+                const diffPct = (diff / price) * 100;
+                const hourlyMove = pred.hourlyPct * price; // $ per hour
+
+                // Estimate timeframe to reach target
+                let timeLabel, willReach;
+                if (hourlyMove === 0 || (diff > 0 && hourlyMove < 0) || (diff < 0 && hourlyMove > 0)) {
+                    // Moving away from target
+                    willReach = false;
+                    timeLabel = 'unlikely';
+                } else {
+                    const hoursToReach = Math.abs(diff / hourlyMove);
+                    willReach = hoursToReach <= 24;
+                    if (hoursToReach < 1) timeLabel = `~${Math.round(hoursToReach * 60)}m`;
+                    else if (hoursToReach <= 24) timeLabel = `~${hoursToReach.toFixed(1)}h`;
+                    else timeLabel = '>24h';
+                }
+
+                const isAbove = target > price;
+                const predAbove = pred.pred1h > target;
+                const predBelow = pred.pred1h < target;
+                const close = Math.abs(diffPct) < 0.3;
+
+                let verdict, cls;
+                if (close) { verdict = 'NEAR'; cls = 'gv-at'; }
+                else if (isAbove) {
+                    verdict = predAbove ? 'ABOVE' : 'BELOW';
+                    cls = predAbove ? 'gv-above' : 'gv-below';
+                } else {
+                    verdict = predBelow ? 'BELOW' : 'ABOVE';
+                    cls = predBelow ? 'gv-below' : 'gv-above';
+                }
+
+                return `<div class="gran-item">
+                    <span class="gran-price">$${Number(target).toLocaleString()}</span>
+                    <span>
+                        <span class="gran-verdict ${cls}">${verdict}</span>
+                        <span style="font-size:10px;color:#8b949e;margin-left:4px">${timeLabel}</span>
+                    </span>
+                </div>`;
+            }).join('') + '</div>';
+        }
+
+        // ── Price checker (input box) ──
+        let lastInd = null, lastPred = null, lastPrice = null;
+
+        function checkPrice() {
+            const input = document.getElementById('price-input');
+            const target = parseFloat(input.value);
+            if (!target || !lastInd || !lastPred || !lastPrice) return;
+            renderCheckerResult(target, lastPrice, lastInd, lastPred);
+        }
+
+        // Also check on Enter key
+        document.addEventListener('DOMContentLoaded', () => {
+            const input = document.getElementById('price-input');
+            if (input) input.addEventListener('keydown', (e) => { if (e.key === 'Enter') checkPrice(); });
+        });
+
+        function renderCheckerResult(target, price, ind, pred) {
+            const el = document.getElementById('checker-result');
+            el.classList.add('visible');
+
+            const diff = target - price;
+            const diffPct = (diff / price) * 100;
+            const hourlyMove = pred.hourlyPct * price;
+
+            // Will price reach this target?
+            const movingToward = (diff > 0 && hourlyMove > 0) || (diff < 0 && hourlyMove < 0);
+
+            // Predicted prices at each timeframe
+            const tf = [
+                { label: '1h', price: pred.pred1h },
+                { label: '4h', price: pred.pred4h },
+                { label: '24h', price: pred.pred24h },
+            ];
+
+            // Determine above/below for each timeframe
+            const tfResults = tf.map(t => ({
+                label: t.label,
+                above: t.price >= target,
+                price: t.price,
+                diff: ((t.price - target) / target) * 100
+            }));
+
+            // Estimated time to reach
+            let etaText;
+            if (!movingToward || hourlyMove === 0) {
+                etaText = `Price is moving <strong>away</strong> from $${fmt(target)} — unlikely to reach this level soon`;
+            } else {
+                const hours = Math.abs(diff / hourlyMove);
+                if (hours < 1) etaText = `Estimated arrival: <strong>~${Math.round(hours * 60)} minutes</strong> at current momentum`;
+                else if (hours <= 24) etaText = `Estimated arrival: <strong>~${hours.toFixed(1)} hours</strong> at current momentum`;
+                else etaText = `Estimated arrival: <strong>${hours.toFixed(0)} hours</strong> — would take over a day`;
+            }
+
+            // Main verdict
+            const above1h = pred.pred1h >= target;
+            const verdictText = above1h ? 'PREDICTED ABOVE' : 'PREDICTED BELOW';
+            const verdictColor = above1h ? '#3fb950' : '#f85149';
+            const action = above1h
+                ? (diff > 0 ? `BTC needs to rise $${fmt(Math.abs(diff))} — model says it will` : `BTC is already above and predicted to stay above`)
+                : (diff < 0 ? `BTC needs to fall $${fmt(Math.abs(diff))} — model says it will` : `BTC is currently above but predicted to drop below`);
+
+            el.innerHTML = `
+                <div class="checker-verdict-big" style="color:${verdictColor}">
+                    ${verdictText} $${fmt(target)} in 1 hour
+                </div>
+                <div class="checker-details">
+                    <div>${action}</div>
+                    <div style="margin-top:4px">Target is <strong>${diff > 0 ? '+' : ''}${diffPct.toFixed(2)}%</strong> (${diff > 0 ? '+' : ''}$${fmt(diff)}) from current price</div>
+                    <div style="margin-top:4px">${etaText}</div>
+                </div>
+                <div class="checker-tf-row">
+                    ${tfResults.map(t => `
+                        <div class="checker-tf">
+                            <div class="checker-tf-label">${t.label}</div>
+                            <div class="checker-tf-val" style="color:${t.above ? '#3fb950' : '#f85149'}">${t.above ? 'ABOVE' : 'BELOW'}</div>
+                            <div style="font-size:10px;color:#8b949e;font-family:monospace">${t.diff > 0 ? '+' : ''}${t.diff.toFixed(2)}%</div>
                         </div>
                     `).join('')}
                 </div>
@@ -946,14 +1353,23 @@
                 const price = currentPrice || parseFloat(k[k.length - 1][4]);
                 if (!currentPrice) currentPrice = price;
 
+                const pred = predictPrice(price, ind);
+                lastPrice = price; lastInd = ind; lastPred = pred;
+
                 renderPrice(price, null);
                 renderSignal(price, ind);
-                renderPrediction(price, ind);
+                renderPrediction(price, ind, pred);
+                renderTradeEntries(price, ind, pred);
+                renderGranularPreds(price, ind, pred);
                 renderIndicators(ind);
                 renderPriceLevels(price, ind);
                 renderBigTrades(trades);
                 renderPolymarket(price, ind);
                 renderUpdated();
+
+                // Auto-update price checker if a value is entered
+                const checkerVal = parseFloat(document.getElementById('price-input').value);
+                if (checkerVal) renderCheckerResult(checkerVal, price, ind, pred);
             } catch (e) {
                 console.error('Update failed:', e);
                 showError('Error: ' + e.message);
