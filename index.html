@@ -512,6 +512,58 @@
             margin-top: 1px;
         }
 
+        /* Accumulated data stats */
+        .accum-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+        }
+
+        .accum-item {
+            background: #0d1117;
+            border-radius: 6px;
+            padding: 8px 10px;
+            text-align: center;
+        }
+
+        .accum-label {
+            font-size: 10px;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+
+        .accum-value {
+            font-size: 15px;
+            font-weight: 700;
+            font-family: monospace;
+            margin-top: 2px;
+        }
+
+        .accum-sub {
+            font-size: 10px;
+            color: #484f58;
+            margin-top: 1px;
+        }
+
+        .accuracy-row {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .accuracy-item {
+            flex: 1;
+            background: #0d1117;
+            border-radius: 6px;
+            padding: 8px;
+            text-align: center;
+        }
+
+        @media (max-width: 768px) {
+            .accum-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+
         /* Last updated */
         #last-updated {
             text-align: center;
@@ -566,6 +618,11 @@
             <div id="granular-preds"><div class="loading">Loading...</div></div>
         </div>
 
+        <div class="card full-width">
+            <h2>Accumulated Data</h2>
+            <div id="accum-stats"><div class="loading">Collecting data...</div></div>
+        </div>
+
         <div class="card">
             <h2>Technical Indicators</h2>
             <div id="indicators" class="indicator-grid"><div class="loading">Loading...</div></div>
@@ -612,6 +669,146 @@
         let activeAPI = null;
         let activeWS = null;
 
+        // ── Accumulated data store (persisted to localStorage) ──
+        const STORAGE_KEY = 'btc_predictor_data';
+        let accumData = loadAccumData();
+
+        function freshAccumData() {
+            return {
+                ticks: [],            // {price, time, qty, side} from WS — last 2 hours
+                minuteCandles: [],     // {o,h,l,c,v,t} aggregated per minute from ticks
+                predictions: [],       // {time, pred1h, actual1h, predDir} for accuracy tracking
+                sessionStart: Date.now(),
+                totalTicks: 0,
+                buyVolume: 0,
+                sellVolume: 0,
+            };
+        }
+
+        function loadAccumData() {
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                if (!raw) return freshAccumData();
+                const d = JSON.parse(raw);
+                // Reset if data is older than 24 hours
+                if (Date.now() - d.sessionStart > 24 * 60 * 60 * 1000) return freshAccumData();
+                return d;
+            } catch (_) { return freshAccumData(); }
+        }
+
+        function saveAccumData() {
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify(accumData)); } catch (_) {}
+        }
+
+        // Record a WS tick into accumulated data
+        function recordTick(price, qty, isBuyerMaker) {
+            const now = Date.now();
+            const side = isBuyerMaker ? 'sell' : 'buy';
+            accumData.ticks.push({ price, time: now, qty, side });
+            accumData.totalTicks++;
+            if (side === 'buy') accumData.buyVolume += qty;
+            else accumData.sellVolume += qty;
+
+            // Trim ticks older than 2 hours
+            const cutoff = now - 2 * 60 * 60 * 1000;
+            while (accumData.ticks.length > 0 && accumData.ticks[0].time < cutoff) {
+                accumData.ticks.shift();
+            }
+
+            // Aggregate into minute candles
+            const minuteKey = Math.floor(now / 60000) * 60000;
+            const lastCandle = accumData.minuteCandles[accumData.minuteCandles.length - 1];
+            if (lastCandle && lastCandle.t === minuteKey) {
+                lastCandle.h = Math.max(lastCandle.h, price);
+                lastCandle.l = Math.min(lastCandle.l, price);
+                lastCandle.c = price;
+                lastCandle.v += qty;
+            } else {
+                accumData.minuteCandles.push({ o: price, h: price, l: price, c: price, v: qty, t: minuteKey });
+            }
+
+            // Trim minute candles older than 6 hours
+            const candleCutoff = now - 6 * 60 * 60 * 1000;
+            while (accumData.minuteCandles.length > 0 && accumData.minuteCandles[0].t < candleCutoff) {
+                accumData.minuteCandles.shift();
+            }
+        }
+
+        // Record a prediction for accuracy tracking
+        function recordPrediction(price, pred1h, direction) {
+            accumData.predictions.push({
+                time: Date.now(),
+                predPrice: pred1h,
+                actualPrice: price, // will be updated later
+                predDir: direction,
+                resolved: false
+            });
+            // Keep last 100 predictions
+            if (accumData.predictions.length > 100) accumData.predictions.shift();
+        }
+
+        // Resolve old predictions (check if 1h has passed)
+        function resolvePredictions(currentPrice) {
+            const now = Date.now();
+            for (const p of accumData.predictions) {
+                if (!p.resolved && now - p.time >= 60 * 60 * 1000) {
+                    p.actual1h = currentPrice;
+                    p.resolved = true;
+                    p.correct = (p.predDir === 'up' && currentPrice > p.actualPrice) ||
+                                (p.predDir === 'down' && currentPrice < p.actualPrice);
+                }
+            }
+        }
+
+        function getPredictionAccuracy() {
+            const resolved = accumData.predictions.filter(p => p.resolved);
+            if (resolved.length === 0) return { total: 0, correct: 0, pct: 0, avgError: 0 };
+            const correct = resolved.filter(p => p.correct).length;
+            const errors = resolved.map(p => Math.abs(p.actual1h - p.predPrice) / p.actualPrice * 100);
+            const avgError = errors.reduce((a, b) => a + b, 0) / errors.length;
+            return { total: resolved.length, correct, pct: (correct / resolved.length) * 100, avgError };
+        }
+
+        // Compute VWAP from accumulated ticks
+        function getAccumVWAP() {
+            if (accumData.ticks.length === 0) return null;
+            let sumPV = 0, sumV = 0;
+            for (const t of accumData.ticks) {
+                sumPV += t.price * t.qty;
+                sumV += t.qty;
+            }
+            return sumV > 0 ? sumPV / sumV : null;
+        }
+
+        // Order flow imbalance from accumulated data
+        function getOrderFlowImbalance() {
+            const recent = accumData.ticks.slice(-500); // last 500 ticks
+            if (recent.length === 0) return 0;
+            let buyV = 0, sellV = 0;
+            for (const t of recent) {
+                if (t.side === 'buy') buyV += t.qty; else sellV += t.qty;
+            }
+            const total = buyV + sellV;
+            return total > 0 ? (buyV - sellV) / total : 0; // -1 to 1
+        }
+
+        // Tick velocity (ticks per second, last 60 seconds)
+        function getTickVelocity() {
+            const now = Date.now();
+            const cutoff = now - 60000;
+            const recent = accumData.ticks.filter(t => t.time >= cutoff);
+            return recent.length / 60;
+        }
+
+        // Price momentum from minute candles
+        function getMinuteCandleMomentum() {
+            const candles = accumData.minuteCandles;
+            if (candles.length < 5) return { m5: 0, m15: 0, m30: 0, m60: 0 };
+            const last = candles[candles.length - 1].c;
+            const get = (n) => candles.length >= n ? (last - candles[candles.length - n].o) / candles[candles.length - n].o : 0;
+            return { m5: get(5), m15: get(15), m30: get(30), m60: get(60) };
+        }
+
         // ── Helpers ──
         const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         const fmtK = (n) => n >= 1000 ? (n / 1000).toFixed(1) + 'K' : fmt(n);
@@ -633,18 +830,24 @@
             throw new Error('All Binance API endpoints are unreachable. Check your internet or try disabling ad-blockers.');
         }
 
-        // ── Binance REST: Klines for indicators ──
-        let klines5m = [];
+        // ── Binance REST: Multi-timeframe Klines ──
+        let klines5m = [], klines15m = [], klines4h = [], klines1d = [];
         async function fetchKlines() {
             const base = await findWorkingAPI();
-            const [res1h, res5m] = await Promise.all([
+            const [res1h, res5m, res15m, res4h, res1d] = await Promise.all([
                 fetch(`${base}/klines?symbol=BTCUSDT&interval=1h&limit=100`),
-                fetch(`${base}/klines?symbol=BTCUSDT&interval=5m&limit=60`)
+                fetch(`${base}/klines?symbol=BTCUSDT&interval=5m&limit=60`),
+                fetch(`${base}/klines?symbol=BTCUSDT&interval=15m&limit=96`),
+                fetch(`${base}/klines?symbol=BTCUSDT&interval=4h&limit=90`),
+                fetch(`${base}/klines?symbol=BTCUSDT&interval=1d&limit=90`)
             ]);
             if (!res1h.ok) throw new Error(`Klines 1h failed: ${res1h.status}`);
             if (!res5m.ok) throw new Error(`Klines 5m failed: ${res5m.status}`);
             klines = await res1h.json();
             klines5m = await res5m.json();
+            klines15m = (await res15m.json()) || [];
+            klines4h = (await res4h.json()) || [];
+            klines1d = (await res1d.json()) || [];
             return klines;
         }
 
@@ -751,12 +954,43 @@
             const closes5m = klines5m.map(k => parseFloat(k[4]));
             const shortMomentum = closes5m.length >= 12
                 ? (closes5m[closes5m.length - 1] - closes5m[closes5m.length - 12]) / closes5m[closes5m.length - 12]
-                : 0; // last 1 hour of 5m candles
+                : 0;
+
+            // 15m closes
+            const closes15m = klines15m.map(k => parseFloat(k[4]));
+
+            // 4h trend
+            const closes4h = klines4h.map(k => parseFloat(k[4]));
+            const sma20_4h = closes4h.length >= 20
+                ? closes4h.slice(-20).reduce((a, b) => a + b, 0) / 20 : closes4h[closes4h.length - 1];
+
+            // Daily trend
+            const closes1d = klines1d.map(k => parseFloat(k[4]));
+            const sma20_1d = closes1d.length >= 20
+                ? closes1d.slice(-20).reduce((a, b) => a + b, 0) / 20 : closes1d[closes1d.length - 1];
+            const sma50_1d = closes1d.length >= 50
+                ? closes1d.slice(-50).reduce((a, b) => a + b, 0) / 50 : sma20_1d;
+
+            // Weekly support/resistance from daily candles
+            const dailyHighs = klines1d.slice(-7).map(k => parseFloat(k[2]));
+            const dailyLows = klines1d.slice(-7).map(k => parseFloat(k[3]));
+            const weeklyResistance = Math.max(...dailyHighs);
+            const weeklySupport = Math.min(...dailyLows);
+
+            // Accumulated data metrics
+            const vwap = getAccumVWAP();
+            const orderFlow = getOrderFlowImbalance();
+            const tickVelocity = getTickVelocity();
+            const candleMomentum = getMinuteCandleMomentum();
 
             return {
                 sma20, sma50, rsi, macd: macdLine, macdSignal: signalLine,
                 macdHist, macdRising, volatility, support, resistance,
-                vol24h, closes, bbUpper, bbLower, bbWidth, shortMomentum, closes5m
+                vol24h, closes, bbUpper, bbLower, bbWidth, shortMomentum, closes5m,
+                closes15m, closes4h, closes1d,
+                sma20_4h, sma20_1d, sma50_1d,
+                weeklyResistance, weeklySupport,
+                vwap, orderFlow, tickVelocity, candleMomentum
             };
         }
 
@@ -793,6 +1027,22 @@
             if (ind.shortMomentum > 0.002) { score += 1; reasons.push('short-term momentum up'); }
             else if (ind.shortMomentum < -0.002) { score -= 1; reasons.push('short-term momentum down'); }
 
+            // Order flow imbalance from accumulated ticks
+            if (ind.orderFlow > 0.15) { score += 1; reasons.push('buy pressure ' + (ind.orderFlow * 100).toFixed(0) + '%'); }
+            else if (ind.orderFlow < -0.15) { score -= 1; reasons.push('sell pressure ' + (Math.abs(ind.orderFlow) * 100).toFixed(0) + '%'); }
+
+            // VWAP position
+            if (ind.vwap && price > ind.vwap * 1.001) { score += 0.5; reasons.push('above VWAP'); }
+            else if (ind.vwap && price < ind.vwap * 0.999) { score -= 0.5; reasons.push('below VWAP'); }
+
+            // Daily trend alignment
+            if (ind.sma20_1d > ind.sma50_1d) { score += 0.5; reasons.push('daily trend up'); }
+            else { score -= 0.5; reasons.push('daily trend down'); }
+
+            // Minute candle momentum (accumulated over session)
+            if (ind.candleMomentum.m30 > 0.003) { score += 0.5; reasons.push('30m momentum up'); }
+            else if (ind.candleMomentum.m30 < -0.003) { score -= 0.5; reasons.push('30m momentum down'); }
+
             const direction = score >= 0 ? 'up' : 'down';
             const topReasons = reasons.slice(0, 3).join(', ');
 
@@ -827,58 +1077,125 @@
 
         // ── Price prediction engine ──
         function predictPrice(price, ind) {
-            // 1) Short-term trend from 5m candles (last 60 = 5 hours)
+            // === Multi-timeframe regression ===
+
+            // 1) Tick-level: minute candles from accumulated WS data
+            const accumCloses = accumData.minuteCandles.map(c => c.c);
+            let tickTrend = 0, tickR2 = 0;
+            if (accumCloses.length >= 10) {
+                const regTick = linReg(accumCloses);
+                // Slope per minute → per hour (x60)
+                tickTrend = (regTick.slope / price) * 60;
+                tickR2 = regTick.r2;
+            }
+
+            // 2) Short-term from 5m candles (last 60 = 5 hours)
             const reg5m = linReg(ind.closes5m);
-            // Slope per 5m candle → per hour (x12)
             const shortTrend = (reg5m.slope / price) * 12;
 
-            // 2) Medium-term trend from 1h candles (last 24)
+            // 3) 15m candles (last 96 = 24 hours)
+            let midTrend15 = 0, r2_15m = 0;
+            if (ind.closes15m.length >= 20) {
+                const reg15m = linReg(ind.closes15m);
+                midTrend15 = (reg15m.slope / price) * 4; // per 15m → per hour
+                r2_15m = reg15m.r2;
+            }
+
+            // 4) 1h candles (last 24)
             const reg1h = linReg(ind.closes.slice(-24));
             const medTrend = reg1h.slope / price;
 
-            // 3) Long-term from 1h candles (all ~100)
-            const reg100h = linReg(ind.closes);
-            const longTrend = reg100h.slope / price;
+            // 5) 4h candles — macro trend
+            let macroTrend = 0;
+            if (ind.closes4h.length >= 20) {
+                const reg4h = linReg(ind.closes4h.slice(-30));
+                macroTrend = (reg4h.slope / price) * 0.25; // per 4h → per hour
+            }
 
-            // 4) RSI mean-reversion pressure (stronger at extremes)
+            // 6) Daily candles — long-term bias
+            let dailyBias = 0;
+            if (ind.closes1d.length >= 10) {
+                const reg1d = linReg(ind.closes1d.slice(-30));
+                dailyBias = (reg1d.slope / price) / 24; // per day → per hour
+            }
+
+            // === Adjustments ===
+
+            // RSI mean-reversion
             let rsiAdj = 0;
             if (ind.rsi > 70) rsiAdj = -0.001 * ((ind.rsi - 70) / 30);
             else if (ind.rsi < 30) rsiAdj = 0.001 * ((30 - ind.rsi) / 30);
-            // Moderate pressure in mid zones
             else if (ind.rsi > 60) rsiAdj = -0.0002;
             else if (ind.rsi < 40) rsiAdj = 0.0002;
 
-            // 5) MACD histogram momentum
+            // MACD histogram
             const macdAdj = ind.macdHist / price * 0.1;
 
-            // 6) Bollinger reversion — price near bands pulls back
+            // Bollinger reversion
             let bbAdj = 0;
-            const bbPos = (price - ind.bbLower) / (ind.bbUpper - ind.bbLower); // 0 to 1
+            const bbPos = (price - ind.bbLower) / (ind.bbUpper - ind.bbLower);
             if (bbPos > 0.9) bbAdj = -0.0005 * (bbPos - 0.9) / 0.1;
             else if (bbPos < 0.1) bbAdj = 0.0005 * (0.1 - bbPos) / 0.1;
 
-            // Weighted combination: short-term weighted most for 1h prediction
-            const hourlyPct = shortTrend * 0.45 + medTrend * 0.30 + longTrend * 0.05 + rsiAdj + macdAdj + bbAdj;
+            // Order flow from accumulated ticks
+            const flowAdj = ind.orderFlow * 0.0005;
 
-            // Predict with diminishing extrapolation for longer timeframes
+            // VWAP deviation
+            let vwapAdj = 0;
+            if (ind.vwap) {
+                const vwapDev = (price - ind.vwap) / ind.vwap;
+                if (Math.abs(vwapDev) > 0.005) vwapAdj = -vwapDev * 0.05; // reversion to VWAP
+            }
+
+            // Minute candle momentum from accumulated data
+            const m30Adj = ind.candleMomentum.m30 * 0.3;
+
+            // === Weighted combination ===
+            // More weight on accumulated tick data when we have enough
+            const hasTickData = accumCloses.length >= 30;
+            const hourlyPct = hasTickData
+                ? tickTrend * 0.25 + shortTrend * 0.20 + midTrend15 * 0.10 + medTrend * 0.10 +
+                  macroTrend * 0.05 + dailyBias * 0.03 + rsiAdj + macdAdj + bbAdj + flowAdj + vwapAdj + m30Adj
+                : shortTrend * 0.40 + medTrend * 0.25 + macroTrend * 0.05 + dailyBias * 0.03 +
+                  rsiAdj + macdAdj + bbAdj + flowAdj + vwapAdj;
+
+            // Predict with sqrt-time scaling for longer timeframes
             const pred1h  = price * (1 + hourlyPct);
-            const pred4h  = price * (1 + hourlyPct * 2.8); // sqrt-time scaling
+            const pred4h  = price * (1 + hourlyPct * 2.8);
             const pred24h = price * (1 + hourlyPct * 7.5);
 
-            // Direction clarity
             const direction = hourlyPct >= 0 ? 'up' : 'down';
 
-            // Confidence from R² of short-term regression + indicator agreement
-            let confidence = Math.round(reg5m.r2 * 40 + reg1h.r2 * 20); // up to 60 from R²
-            const trendAgree = (shortTrend > 0 && medTrend > 0) || (shortTrend < 0 && medTrend < 0);
-            if (trendAgree) confidence += 15;
-            const macdAgree = (ind.macdHist > 0 && hourlyPct > 0) || (ind.macdHist < 0 && hourlyPct < 0);
-            if (macdAgree) confidence += 10;
-            if (ind.rsi > 35 && ind.rsi < 65) confidence += 5; // mid-RSI = more predictable
-            if (ind.volatility > 2) confidence -= 10;
-            confidence = Math.max(15, Math.min(90, confidence));
+            // === Confidence ===
+            let confidence = 0;
+            // R² from multiple timeframes
+            confidence += Math.round(reg5m.r2 * 20 + reg1h.r2 * 15);
+            if (hasTickData) confidence += Math.round(tickR2 * 20);
+            if (r2_15m > 0) confidence += Math.round(r2_15m * 10);
 
-            // Price range from recent volatility
+            // Trend agreement across timeframes
+            const trends = [tickTrend, shortTrend, midTrend15, medTrend, macroTrend, dailyBias].filter(t => t !== 0);
+            const allSameDir = trends.every(t => t > 0) || trends.every(t => t < 0);
+            const mostSameDir = trends.filter(t => (hourlyPct > 0 ? t > 0 : t < 0)).length / trends.length;
+            if (allSameDir) confidence += 15;
+            else confidence += Math.round(mostSameDir * 10);
+
+            // Indicator agreement
+            if ((ind.macdHist > 0 && hourlyPct > 0) || (ind.macdHist < 0 && hourlyPct < 0)) confidence += 5;
+            if (ind.rsi > 35 && ind.rsi < 65) confidence += 5;
+            if (ind.volatility > 2) confidence -= 10;
+
+            // Bonus for having accumulated data
+            if (accumData.minuteCandles.length >= 60) confidence += 5;
+            if (accumData.totalTicks >= 1000) confidence += 3;
+
+            // Past accuracy bonus
+            const accuracy = getPredictionAccuracy();
+            if (accuracy.total >= 5 && accuracy.pct > 60) confidence += 5;
+
+            confidence = Math.max(15, Math.min(95, confidence));
+
+            // Price range
             const rangePct = ind.volatility * 3 / 100;
             const low1h  = Math.min(pred1h, price) * (1 - rangePct);
             const high1h = Math.max(pred1h, price) * (1 + rangePct);
@@ -1200,6 +1517,84 @@
             `;
         }
 
+        // ── Render accumulated data stats ──
+        function renderAccumStats(ind) {
+            const el = document.getElementById('accum-stats');
+            const accuracy = getPredictionAccuracy();
+            const sessionMins = Math.round((Date.now() - accumData.sessionStart) / 60000);
+            const sessionLabel = sessionMins >= 60 ? `${(sessionMins / 60).toFixed(1)}h` : `${sessionMins}m`;
+            const totalBuy = accumData.buyVolume;
+            const totalSell = accumData.sellVolume;
+            const flowPct = (totalBuy + totalSell) > 0
+                ? ((totalBuy - totalSell) / (totalBuy + totalSell) * 100).toFixed(1) : '0.0';
+            const flowColor = parseFloat(flowPct) > 0 ? '#3fb950' : parseFloat(flowPct) < 0 ? '#f85149' : '#8b949e';
+
+            el.innerHTML = `
+                <div class="accum-grid">
+                    <div class="accum-item">
+                        <div class="accum-label">Session</div>
+                        <div class="accum-value" style="color:#58a6ff">${sessionLabel}</div>
+                        <div class="accum-sub">${accumData.totalTicks.toLocaleString()} ticks</div>
+                    </div>
+                    <div class="accum-item">
+                        <div class="accum-label">Minute Candles</div>
+                        <div class="accum-value" style="color:#58a6ff">${accumData.minuteCandles.length}</div>
+                        <div class="accum-sub">compiled locally</div>
+                    </div>
+                    <div class="accum-item">
+                        <div class="accum-label">VWAP</div>
+                        <div class="accum-value">${ind.vwap ? '$' + fmt(ind.vwap) : '—'}</div>
+                        <div class="accum-sub">from ${accumData.ticks.length} ticks</div>
+                    </div>
+                    <div class="accum-item">
+                        <div class="accum-label">Order Flow</div>
+                        <div class="accum-value" style="color:${flowColor}">${flowPct}%</div>
+                        <div class="accum-sub">${parseFloat(flowPct) > 0 ? 'buy heavy' : parseFloat(flowPct) < 0 ? 'sell heavy' : 'neutral'}</div>
+                    </div>
+                    <div class="accum-item">
+                        <div class="accum-label">Tick Rate</div>
+                        <div class="accum-value">${ind.tickVelocity.toFixed(1)}/s</div>
+                        <div class="accum-sub">last 60 seconds</div>
+                    </div>
+                    <div class="accum-item">
+                        <div class="accum-label">5m Move</div>
+                        <div class="accum-value" style="color:${ind.candleMomentum.m5 >= 0 ? '#3fb950' : '#f85149'}">${(ind.candleMomentum.m5 * 100).toFixed(3)}%</div>
+                        <div class="accum-sub">from local data</div>
+                    </div>
+                    <div class="accum-item">
+                        <div class="accum-label">30m Move</div>
+                        <div class="accum-value" style="color:${ind.candleMomentum.m30 >= 0 ? '#3fb950' : '#f85149'}">${(ind.candleMomentum.m30 * 100).toFixed(3)}%</div>
+                        <div class="accum-sub">from local data</div>
+                    </div>
+                    <div class="accum-item">
+                        <div class="accum-label">Timeframes</div>
+                        <div class="accum-value" style="color:#58a6ff">6</div>
+                        <div class="accum-sub">1m 5m 15m 1h 4h 1d</div>
+                    </div>
+                </div>
+                ${accuracy.total > 0 ? `
+                <div class="accuracy-row">
+                    <div class="accuracy-item">
+                        <div class="accum-label">Direction Accuracy</div>
+                        <div class="accum-value" style="color:${accuracy.pct >= 55 ? '#3fb950' : accuracy.pct >= 45 ? '#d29922' : '#f85149'}">${accuracy.pct.toFixed(0)}%</div>
+                        <div class="accum-sub">${accuracy.correct}/${accuracy.total} correct</div>
+                    </div>
+                    <div class="accuracy-item">
+                        <div class="accum-label">Avg Price Error</div>
+                        <div class="accum-value">${accuracy.avgError.toFixed(2)}%</div>
+                        <div class="accum-sub">predicted vs actual</div>
+                    </div>
+                </div>` : `
+                <div class="accuracy-row">
+                    <div class="accuracy-item" style="flex:1">
+                        <div class="accum-label">Prediction Accuracy</div>
+                        <div class="accum-value" style="color:#484f58">—</div>
+                        <div class="accum-sub">tracking... first result in ~1 hour</div>
+                    </div>
+                </div>`}
+            `;
+        }
+
         // ── Polymarket predictions based on indicators ──
         function getPolymarketPredictions(price, ind) {
             const { signal } = getSignal(price, ind);
@@ -1283,12 +1678,12 @@
                     <div class="indicator-value">${ind.bbWidth.toFixed(2)}%</div>
                 </div>
                 <div class="indicator">
-                    <div class="indicator-label">5m Momentum</div>
-                    <div class="indicator-value" style="color:${ind.shortMomentum > 0 ? '#3fb950' : '#f85149'}">${(ind.shortMomentum * 100).toFixed(3)}%</div>
+                    <div class="indicator-label">4h SMA 20</div>
+                    <div class="indicator-value" style="color:${currentPrice > ind.sma20_4h ? '#3fb950' : '#f85149'}">$${fmt(ind.sma20_4h)}</div>
                 </div>
                 <div class="indicator">
-                    <div class="indicator-label">24h Volume</div>
-                    <div class="indicator-value">${ind.vol24h.toFixed(0)} BTC</div>
+                    <div class="indicator-label">Daily SMA 20</div>
+                    <div class="indicator-value" style="color:${currentPrice > ind.sma20_1d ? '#3fb950' : '#f85149'}">$${fmt(ind.sma20_1d)}</div>
                 </div>
             `;
         }
@@ -1296,10 +1691,13 @@
         function renderPriceLevels(price, ind) {
             const el = document.getElementById('price-levels');
             const levels = [
+                { label: 'Weekly Resistance', value: ind.weeklyResistance },
                 { label: 'Resistance (24h High)', value: ind.resistance },
+                { label: 'VWAP (Session)', value: ind.vwap || ind.sma20 },
                 { label: 'SMA 20', value: ind.sma20 },
                 { label: 'SMA 50', value: ind.sma50 },
                 { label: 'Support (24h Low)', value: ind.support },
+                { label: 'Weekly Support', value: ind.weeklySupport },
             ];
             el.innerHTML = levels.map(l => {
                 const cls = price >= l.value ? 'price-above' : 'price-below';
@@ -1353,14 +1751,25 @@
                 const price = currentPrice || parseFloat(k[k.length - 1][4]);
                 if (!currentPrice) currentPrice = price;
 
+                // Resolve old predictions and record new one
+                resolvePredictions(price);
+
                 const pred = predictPrice(price, ind);
                 lastPrice = price; lastInd = ind; lastPred = pred;
+
+                // Record prediction every 5 minutes (not every 10s)
+                const lastPredTime = accumData.predictions.length > 0
+                    ? accumData.predictions[accumData.predictions.length - 1].time : 0;
+                if (Date.now() - lastPredTime >= 5 * 60 * 1000) {
+                    recordPrediction(price, pred.pred1h, pred.direction);
+                }
 
                 renderPrice(price, null);
                 renderSignal(price, ind);
                 renderPrediction(price, ind, pred);
                 renderTradeEntries(price, ind, pred);
                 renderGranularPreds(price, ind, pred);
+                renderAccumStats(ind);
                 renderIndicators(ind);
                 renderPriceLevels(price, ind);
                 renderBigTrades(trades);
@@ -1370,6 +1779,9 @@
                 // Auto-update price checker if a value is entered
                 const checkerVal = parseFloat(document.getElementById('price-input').value);
                 if (checkerVal) renderCheckerResult(checkerVal, price, ind, pred);
+
+                // Save accumulated data to localStorage
+                saveAccumData();
             } catch (e) {
                 console.error('Update failed:', e);
                 showError('Error: ' + e.message);
@@ -1391,7 +1803,9 @@
                     const data = JSON.parse(e.data);
                     prevPrice = currentPrice;
                     currentPrice = parseFloat(data.p);
+                    const qty = parseFloat(data.q);
                     renderPrice(currentPrice, prevPrice);
+                    recordTick(currentPrice, qty, data.m);
                 };
 
                 ws.onclose = () => {
