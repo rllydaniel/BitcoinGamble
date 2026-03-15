@@ -196,6 +196,150 @@
             margin-top: 2px;
         }
 
+        /* Prediction card */
+        .prediction-hero {
+            text-align: center;
+            padding: 16px 0;
+            border-bottom: 1px solid #21262d;
+            margin-bottom: 12px;
+        }
+
+        .prediction-hero .pred-label {
+            font-size: 11px;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .prediction-hero .pred-price {
+            font-size: 32px;
+            font-weight: 800;
+            font-family: monospace;
+            margin: 4px 0;
+        }
+
+        .prediction-hero .pred-change {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .pred-timeframes {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 14px;
+        }
+
+        .pred-tf {
+            background: #0d1117;
+            border-radius: 6px;
+            padding: 10px;
+            text-align: center;
+        }
+
+        .pred-tf-label {
+            font-size: 10px;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .pred-tf-price {
+            font-size: 16px;
+            font-weight: 700;
+            font-family: monospace;
+            margin: 2px 0;
+        }
+
+        .pred-tf-change {
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        /* Confidence bar */
+        .confidence-bar-wrap {
+            margin: 12px 0;
+        }
+
+        .confidence-bar-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: #8b949e;
+            margin-bottom: 4px;
+        }
+
+        .confidence-bar-bg {
+            height: 6px;
+            background: #21262d;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .confidence-bar-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.5s ease;
+        }
+
+        /* Action plan */
+        .action-plan {
+            margin-top: 14px;
+            border-top: 1px solid #21262d;
+            padding-top: 14px;
+        }
+
+        .action-plan h3 {
+            font-size: 12px;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 10px;
+        }
+
+        .action-step {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 6px 0;
+            font-size: 13px;
+        }
+
+        .action-icon {
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: 700;
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+
+        .action-icon-buy { background: rgba(35,134,54,0.2); color: #3fb950; }
+        .action-icon-sell { background: rgba(218,54,51,0.2); color: #f85149; }
+        .action-icon-hold { background: rgba(187,128,9,0.2); color: #d29922; }
+        .action-icon-info { background: rgba(56,139,253,0.2); color: #58a6ff; }
+
+        .action-text { line-height: 1.4; }
+        .action-text strong { color: #e6edf3; }
+
+        .pred-range {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #8b949e;
+            margin-top: 8px;
+            padding: 6px 0;
+            border-top: 1px solid #21262d;
+        }
+
+        .pred-range span { font-family: monospace; }
+        .range-low { color: #f85149; }
+        .range-high { color: #3fb950; }
+
         /* Last updated */
         #last-updated {
             text-align: center;
@@ -225,6 +369,11 @@
 
     <div class="container">
         <div id="signal-banner" class="signal-banner signal-neutral">Loading signal...</div>
+
+        <div class="card full-width">
+            <h2>Price Prediction</h2>
+            <div id="prediction"><div class="loading">Loading...</div></div>
+        </div>
 
         <div class="card">
             <h2>Technical Indicators</h2>
@@ -398,6 +547,157 @@
             return { signal: 'HOLD', reason: 'Mixed signals — wait for clearer trend confirmation' };
         }
 
+        // ── Price prediction engine ──
+        function predictPrice(price, ind) {
+            const closes = ind.closes;
+            const len = closes.length;
+
+            // Linear regression on last 24 hourly closes for short-term trend
+            const recent = closes.slice(-24);
+            const n = recent.length;
+            let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+            for (let i = 0; i < n; i++) {
+                sumX += i; sumY += recent[i];
+                sumXY += i * recent[i]; sumX2 += i * i;
+            }
+            const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+            const intercept = (sumY - slope * sumX) / n;
+
+            // Hourly slope as base momentum
+            const hourlyDrift = slope;
+
+            // Adjust with RSI mean-reversion pressure
+            let rsiAdj = 0;
+            if (ind.rsi > 70) rsiAdj = -0.0015 * (ind.rsi - 70); // overbought pulls down
+            else if (ind.rsi < 30) rsiAdj = 0.0015 * (30 - ind.rsi); // oversold pulls up
+
+            // MACD momentum factor
+            const macdAdj = ind.macd > 0 ? 0.0002 : -0.0002;
+
+            // SMA trend alignment bonus
+            const trendBonus = (ind.sma20 > ind.sma50) ? 0.0003 : -0.0003;
+
+            // Combined hourly expected move
+            const hourlyPct = (hourlyDrift / price) + rsiAdj + macdAdj + trendBonus;
+
+            // Predict future prices
+            const pred1h  = price * (1 + hourlyPct);
+            const pred4h  = price * (1 + hourlyPct * 3.2); // diminishing factor
+            const pred24h = price * (1 + hourlyPct * 12);   // more diminishing
+
+            // Confidence based on trend consistency + volatility
+            const trendConsistent = (ind.sma20 > ind.sma50 && ind.macd > 0) || (ind.sma20 < ind.sma50 && ind.macd < 0);
+            let confidence = 50;
+            if (trendConsistent) confidence += 15;
+            if (ind.rsi > 40 && ind.rsi < 60) confidence += 10; // neutral RSI = more predictable
+            if (ind.volatility < 0.5) confidence += 15;
+            else if (ind.volatility > 1.5) confidence -= 15;
+            // Clamp
+            confidence = Math.max(20, Math.min(90, confidence));
+
+            // Price range (based on volatility)
+            const rangePct = ind.volatility * 2.5 / 100; // ~2.5x volatility for 1h range
+            const low1h  = pred1h * (1 - rangePct);
+            const high1h = pred1h * (1 + rangePct);
+
+            // Action plan for next hour
+            const { signal } = getSignal(price, ind);
+            const actions = generateActionPlan(price, pred1h, signal, ind);
+
+            return { pred1h, pred4h, pred24h, confidence, low1h, high1h, actions, hourlyPct };
+        }
+
+        function generateActionPlan(price, pred1h, signal, ind) {
+            const steps = [];
+            const change = ((pred1h - price) / price) * 100;
+            const aboveSupport = price - ind.support;
+            const belowResist = ind.resistance - price;
+
+            if (signal === 'BUY') {
+                steps.push({ icon: 'buy', text: `<strong>Enter long position</strong> — momentum is bullish with price predicted at $${fmt(pred1h)} in 1 hour` });
+                if (ind.rsi < 40) steps.push({ icon: 'buy', text: `<strong>RSI at ${ind.rsi.toFixed(0)}</strong> — still has room to run before overbought territory` });
+                steps.push({ icon: 'info', text: `Set stop-loss at <strong>$${fmt(ind.support)}</strong> (24h support, $${fmt(aboveSupport)} below current)` });
+                steps.push({ icon: 'info', text: `Take profit target: <strong>$${fmt(ind.resistance)}</strong> (24h resistance)` });
+            } else if (signal === 'SELL') {
+                steps.push({ icon: 'sell', text: `<strong>Exit or short</strong> — bearish signals with price predicted at $${fmt(pred1h)} in 1 hour` });
+                if (ind.rsi > 60) steps.push({ icon: 'sell', text: `<strong>RSI at ${ind.rsi.toFixed(0)}</strong> — showing overbought pressure, expect pullback` });
+                steps.push({ icon: 'info', text: `Support level at <strong>$${fmt(ind.support)}</strong> — if broken, expect further downside` });
+                steps.push({ icon: 'info', text: `Set stop-loss at <strong>$${fmt(ind.resistance)}</strong> if shorting` });
+            } else {
+                steps.push({ icon: 'hold', text: `<strong>Wait for confirmation</strong> — mixed signals, predicted move is only ${change > 0 ? '+' : ''}${change.toFixed(2)}%` });
+                steps.push({ icon: 'info', text: `Watch for break above <strong>$${fmt(ind.resistance)}</strong> to go long` });
+                steps.push({ icon: 'info', text: `Watch for break below <strong>$${fmt(ind.support)}</strong> to go short` });
+                if (ind.volatility < 0.3) steps.push({ icon: 'hold', text: `Low volatility (<strong>${ind.volatility.toFixed(2)}%</strong>) — breakout incoming, wait for direction` });
+            }
+
+            return steps;
+        }
+
+        // ── Render prediction ──
+        function renderPrediction(price, ind) {
+            const pred = predictPrice(price, ind);
+            const el = document.getElementById('prediction');
+
+            const change1h  = ((pred.pred1h - price) / price) * 100;
+            const change4h  = ((pred.pred4h - price) / price) * 100;
+            const change24h = ((pred.pred24h - price) / price) * 100;
+
+            const chgColor = (v) => v >= 0 ? '#3fb950' : '#f85149';
+            const chgText = (v) => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+            const confColor = pred.confidence >= 65 ? '#3fb950' : pred.confidence >= 45 ? '#d29922' : '#f85149';
+
+            el.innerHTML = `
+                <div class="prediction-hero">
+                    <div class="pred-label">1-Hour Predicted Price</div>
+                    <div class="pred-price" style="color: ${chgColor(change1h)}">$${fmt(pred.pred1h)}</div>
+                    <div class="pred-change" style="color: ${chgColor(change1h)}">${chgText(change1h)} from current $${fmt(price)}</div>
+                </div>
+
+                <div class="pred-timeframes">
+                    <div class="pred-tf">
+                        <div class="pred-tf-label">1 Hour</div>
+                        <div class="pred-tf-price" style="color: ${chgColor(change1h)}">$${fmt(pred.pred1h)}</div>
+                        <div class="pred-tf-change" style="color: ${chgColor(change1h)}">${chgText(change1h)}</div>
+                    </div>
+                    <div class="pred-tf">
+                        <div class="pred-tf-label">4 Hours</div>
+                        <div class="pred-tf-price" style="color: ${chgColor(change4h)}">$${fmt(pred.pred4h)}</div>
+                        <div class="pred-tf-change" style="color: ${chgColor(change4h)}">${chgText(change4h)}</div>
+                    </div>
+                    <div class="pred-tf">
+                        <div class="pred-tf-label">24 Hours</div>
+                        <div class="pred-tf-price" style="color: ${chgColor(change24h)}">$${fmt(pred.pred24h)}</div>
+                        <div class="pred-tf-change" style="color: ${chgColor(change24h)}">${chgText(change24h)}</div>
+                    </div>
+                </div>
+
+                <div class="pred-range">
+                    <span>1h Range: <span class="range-low">$${fmt(pred.low1h)}</span></span>
+                    <span><span class="range-high">$${fmt(pred.high1h)}</span></span>
+                </div>
+
+                <div class="confidence-bar-wrap">
+                    <div class="confidence-bar-label">
+                        <span>Prediction Confidence</span>
+                        <span style="color:${confColor}">${pred.confidence}%</span>
+                    </div>
+                    <div class="confidence-bar-bg">
+                        <div class="confidence-bar-fill" style="width:${pred.confidence}%; background:${confColor}"></div>
+                    </div>
+                </div>
+
+                <div class="action-plan">
+                    <h3>What To Do Next Hour</h3>
+                    ${pred.actions.map(a => `
+                        <div class="action-step">
+                            <div class="action-icon action-icon-${a.icon}">${a.icon === 'buy' ? 'B' : a.icon === 'sell' ? 'S' : a.icon === 'hold' ? 'H' : 'i'}</div>
+                            <div class="action-text">${a.text}</div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
         // ── Polymarket predictions based on indicators ──
         function getPolymarketPredictions(price, ind) {
             const { signal } = getSignal(price, ind);
@@ -543,6 +843,7 @@
 
                 renderPrice(price, null);
                 renderSignal(price, ind);
+                renderPrediction(price, ind);
                 renderIndicators(ind);
                 renderPriceLevels(price, ind);
                 renderBigTrades(trades);
