@@ -251,30 +251,62 @@
 
     <script>
         // ── Config ──
-        const BINANCE_REST  = 'https://api.binance.com/api/v3';
-        const BINANCE_WS    = 'wss://stream.binance.com:9443/ws/btcusdt@trade';
-        const BIG_TRADE_USD = 50000; // trades above $50k shown
-        const REFRESH_MS    = 15000; // refresh indicators every 15s
+        const API_ENDPOINTS = [
+            'https://api.binance.com/api/v3',
+            'https://api.binance.us/api/v3',
+            'https://api1.binance.com/api/v3',
+            'https://api2.binance.com/api/v3',
+            'https://api3.binance.com/api/v3',
+        ];
+        const WS_ENDPOINTS = [
+            'wss://stream.binance.com:9443/ws/btcusdt@trade',
+            'wss://stream.binance.us:9443/ws/btcusdt@trade',
+        ];
+        const BIG_TRADE_USD = 50000;
+        const REFRESH_MS    = 15000;
 
         // ── State ──
         let currentPrice = null;
         let bigTrades = [];
         let klines = [];
+        let activeAPI = null;
+        let activeWS = null;
 
         // ── Helpers ──
         const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         const fmtK = (n) => n >= 1000 ? (n / 1000).toFixed(1) + 'K' : fmt(n);
 
+        function showError(msg) {
+            document.getElementById('signal-banner').className = 'signal-banner signal-sell';
+            document.getElementById('signal-banner').textContent = msg;
+        }
+
+        // ── Find a working API endpoint ──
+        async function findWorkingAPI() {
+            if (activeAPI) return activeAPI;
+            for (const base of API_ENDPOINTS) {
+                try {
+                    const res = await fetch(`${base}/ping`, { signal: AbortSignal.timeout(5000) });
+                    if (res.ok) { activeAPI = base; return base; }
+                } catch (_) {}
+            }
+            throw new Error('All Binance API endpoints are unreachable. Check your internet or try disabling ad-blockers.');
+        }
+
         // ── Binance REST: Klines for indicators ──
         async function fetchKlines() {
-            const res = await fetch(`${BINANCE_REST}/klines?symbol=BTCUSDT&interval=1h&limit=100`);
+            const base = await findWorkingAPI();
+            const res = await fetch(`${base}/klines?symbol=BTCUSDT&interval=1h&limit=100`);
+            if (!res.ok) throw new Error(`Klines request failed: ${res.status}`);
             klines = await res.json();
             return klines;
         }
 
         // ── Binance REST: Recent trades ──
         async function fetchRecentTrades() {
-            const res = await fetch(`${BINANCE_REST}/trades?symbol=BTCUSDT&limit=1000`);
+            const base = await findWorkingAPI();
+            const res = await fetch(`${base}/trades?symbol=BTCUSDT&limit=1000`);
+            if (!res.ok) throw new Error(`Trades request failed: ${res.status}`);
             const trades = await res.json();
             const big = trades
                 .map(t => ({
@@ -509,6 +541,7 @@
                 const price = currentPrice || parseFloat(k[k.length - 1][4]);
                 if (!currentPrice) currentPrice = price;
 
+                renderPrice(price, null);
                 renderSignal(price, ind);
                 renderIndicators(ind);
                 renderPriceLevels(price, ind);
@@ -517,23 +550,37 @@
                 renderUpdated();
             } catch (e) {
                 console.error('Update failed:', e);
+                showError('Error: ' + e.message);
+                // Reset active API so next attempt tries all endpoints again
+                activeAPI = null;
             }
         }
 
         // ── WebSocket for live price ──
+        let wsIndex = 0;
         function connectWS() {
-            const ws = new WebSocket(BINANCE_WS);
+            const url = WS_ENDPOINTS[wsIndex % WS_ENDPOINTS.length];
             let prevPrice = null;
 
-            ws.onmessage = (e) => {
-                const data = JSON.parse(e.data);
-                prevPrice = currentPrice;
-                currentPrice = parseFloat(data.p);
-                renderPrice(currentPrice, prevPrice);
-            };
+            try {
+                const ws = new WebSocket(url);
 
-            ws.onclose = () => setTimeout(connectWS, 3000);
-            ws.onerror = () => ws.close();
+                ws.onmessage = (e) => {
+                    const data = JSON.parse(e.data);
+                    prevPrice = currentPrice;
+                    currentPrice = parseFloat(data.p);
+                    renderPrice(currentPrice, prevPrice);
+                };
+
+                ws.onclose = () => {
+                    wsIndex++;
+                    setTimeout(connectWS, 3000);
+                };
+                ws.onerror = () => ws.close();
+            } catch (_) {
+                wsIndex++;
+                setTimeout(connectWS, 3000);
+            }
         }
 
         // ── Init ──
