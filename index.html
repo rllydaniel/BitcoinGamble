@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bitcoin Price Predictor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            min-height: 100vh;
+        }
+
+        header {
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        header h1 {
+            font-size: 20px;
+            font-weight: 600;
+            color: #f0b90b;
+        }
+
+        #live-price {
+            font-size: 22px;
+            font-weight: 700;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 16px;
+        }
+
+        .card h2 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #8b949e;
+            margin-bottom: 12px;
+        }
+
+        .full-width { grid-column: 1 / -1; }
+
+        /* Signal banner */
+        .signal-banner {
+            grid-column: 1 / -1;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+
+        .signal-buy {
+            background: rgba(35, 134, 54, 0.15);
+            border: 1px solid #238636;
+            color: #3fb950;
+        }
+
+        .signal-sell {
+            background: rgba(218, 54, 51, 0.15);
+            border: 1px solid #da3633;
+            color: #f85149;
+        }
+
+        .signal-neutral {
+            background: rgba(187, 128, 9, 0.15);
+            border: 1px solid #bb8009;
+            color: #d29922;
+        }
+
+        /* Price levels */
+        .level-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #21262d;
+            font-size: 14px;
+        }
+
+        .level-row:last-child { border-bottom: none; }
+
+        .level-label { color: #8b949e; }
+        .level-value { font-weight: 600; font-family: monospace; }
+
+        .price-above { color: #3fb950; }
+        .price-below { color: #f85149; }
+
+        /* Trade table */
+        .trade-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .trade-table th {
+            text-align: left;
+            color: #8b949e;
+            font-weight: 500;
+            padding: 6px 8px;
+            border-bottom: 1px solid #30363d;
+        }
+
+        .trade-table td {
+            padding: 6px 8px;
+            border-bottom: 1px solid #21262d;
+            font-family: monospace;
+        }
+
+        .buy-row td:first-child { color: #3fb950; }
+        .sell-row td:first-child { color: #f85149; }
+
+        /* Polymarket */
+        .poly-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #21262d;
+        }
+
+        .poly-row:last-child { border-bottom: none; }
+
+        .poly-question {
+            flex: 1;
+            font-size: 14px;
+        }
+
+        .poly-verdict {
+            font-weight: 700;
+            font-size: 13px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            margin-left: 12px;
+            white-space: nowrap;
+        }
+
+        .verdict-yes {
+            background: rgba(35, 134, 54, 0.2);
+            color: #3fb950;
+        }
+
+        .verdict-no {
+            background: rgba(218, 54, 51, 0.2);
+            color: #f85149;
+        }
+
+        .verdict-maybe {
+            background: rgba(187, 128, 9, 0.2);
+            color: #d29922;
+        }
+
+        /* Indicators */
+        .indicator-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .indicator {
+            background: #0d1117;
+            border-radius: 6px;
+            padding: 10px 12px;
+        }
+
+        .indicator-label {
+            font-size: 11px;
+            color: #8b949e;
+            text-transform: uppercase;
+        }
+
+        .indicator-value {
+            font-size: 18px;
+            font-weight: 700;
+            font-family: monospace;
+            margin-top: 2px;
+        }
+
+        /* Last updated */
+        #last-updated {
+            text-align: center;
+            color: #484f58;
+            font-size: 12px;
+            padding: 12px;
+            grid-column: 1 / -1;
+        }
+
+        /* Loading */
+        .loading {
+            color: #484f58;
+            text-align: center;
+            padding: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .container { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>BTC Predictor</h1>
+        <div id="live-price" class="loading">Loading...</div>
+    </header>
+
+    <div class="container">
+        <div id="signal-banner" class="signal-banner signal-neutral">Loading signal...</div>
+
+        <div class="card">
+            <h2>Technical Indicators</h2>
+            <div id="indicators" class="indicator-grid"><div class="loading">Loading...</div></div>
+        </div>
+
+        <div class="card">
+            <h2>Key Price Levels</h2>
+            <div id="price-levels"><div class="loading">Loading...</div></div>
+        </div>
+
+        <div class="card full-width">
+            <h2>Large Trades (Last 100)</h2>
+            <div id="big-trades" style="max-height: 300px; overflow-y: auto;"><div class="loading">Loading...</div></div>
+        </div>
+
+        <div class="card full-width">
+            <h2>Polymarket Predictions</h2>
+            <div id="polymarket"><div class="loading">Loading...</div></div>
+        </div>
+
+        <div id="last-updated"></div>
+    </div>
+
+    <script>
+        // ── Config ──
+        const BINANCE_REST  = 'https://api.binance.com/api/v3';
+        const BINANCE_WS    = 'wss://stream.binance.com:9443/ws/btcusdt@trade';
+        const BIG_TRADE_USD = 50000; // trades above $50k shown
+        const REFRESH_MS    = 15000; // refresh indicators every 15s
+
+        // ── State ──
+        let currentPrice = null;
+        let bigTrades = [];
+        let klines = [];
+
+        // ── Helpers ──
+        const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const fmtK = (n) => n >= 1000 ? (n / 1000).toFixed(1) + 'K' : fmt(n);
+
+        // ── Binance REST: Klines for indicators ──
+        async function fetchKlines() {
+            const res = await fetch(`${BINANCE_REST}/klines?symbol=BTCUSDT&interval=1h&limit=100`);
+            klines = await res.json();
+            return klines;
+        }
+
+        // ── Binance REST: Recent trades ──
+        async function fetchRecentTrades() {
+            const res = await fetch(`${BINANCE_REST}/trades?symbol=BTCUSDT&limit=1000`);
+            const trades = await res.json();
+            const big = trades
+                .map(t => ({
+                    price: parseFloat(t.price),
+                    qty: parseFloat(t.qty),
+                    usd: parseFloat(t.price) * parseFloat(t.qty),
+                    side: t.isBuyerMaker ? 'SELL' : 'BUY',
+                    time: new Date(t.time)
+                }))
+                .filter(t => t.usd >= BIG_TRADE_USD)
+                .sort((a, b) => b.time - a.time)
+                .slice(0, 100);
+            bigTrades = big;
+            return big;
+        }
+
+        // ── Compute indicators from klines ──
+        function computeIndicators(klines) {
+            const closes = klines.map(k => parseFloat(k[4]));
+            const highs  = klines.map(k => parseFloat(k[2]));
+            const lows   = klines.map(k => parseFloat(k[3]));
+            const volumes = klines.map(k => parseFloat(k[5]));
+
+            // SMA
+            const sma20 = closes.slice(-20).reduce((a, b) => a + b, 0) / 20;
+            const sma50 = closes.slice(-50).reduce((a, b) => a + b, 0) / 50;
+
+            // RSI (14-period)
+            const rsiPeriod = 14;
+            let gains = 0, losses = 0;
+            for (let i = closes.length - rsiPeriod; i < closes.length; i++) {
+                const diff = closes[i] - closes[i - 1];
+                if (diff > 0) gains += diff;
+                else losses -= diff;
+            }
+            const avgGain = gains / rsiPeriod;
+            const avgLoss = losses / rsiPeriod;
+            const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+            const rsi = 100 - (100 / (1 + rs));
+
+            // MACD
+            const ema = (data, period) => {
+                const k = 2 / (period + 1);
+                let e = data[0];
+                for (let i = 1; i < data.length; i++) e = data[i] * k + e * (1 - k);
+                return e;
+            };
+            const ema12 = ema(closes, 12);
+            const ema26 = ema(closes, 26);
+            const macd = ema12 - ema26;
+
+            // Volatility (std dev of last 20 hourly returns)
+            const returns = [];
+            for (let i = closes.length - 20; i < closes.length; i++) {
+                returns.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+            }
+            const meanRet = returns.reduce((a, b) => a + b, 0) / returns.length;
+            const variance = returns.reduce((a, b) => a + (b - meanRet) ** 2, 0) / returns.length;
+            const volatility = Math.sqrt(variance) * 100;
+
+            // Support / Resistance (recent swing low/high)
+            const recentLows  = lows.slice(-24);
+            const recentHighs = highs.slice(-24);
+            const support    = Math.min(...recentLows);
+            const resistance = Math.max(...recentHighs);
+
+            // 24h volume
+            const vol24h = volumes.slice(-24).reduce((a, b) => a + b, 0);
+
+            return { sma20, sma50, rsi, macd, volatility, support, resistance, vol24h, closes };
+        }
+
+        // ── Determine signal ──
+        function getSignal(price, ind) {
+            let score = 0;
+
+            // SMA crossover
+            if (ind.sma20 > ind.sma50) score += 1; else score -= 1;
+            // Price vs SMA20
+            if (price > ind.sma20) score += 1; else score -= 1;
+            // RSI
+            if (ind.rsi < 30) score += 2;       // oversold = buy
+            else if (ind.rsi > 70) score -= 2;  // overbought = sell
+            // MACD
+            if (ind.macd > 0) score += 1; else score -= 1;
+
+            if (score >= 2) return { signal: 'BUY', reason: 'Bullish momentum — price above key averages, positive MACD' };
+            if (score <= -2) return { signal: 'SELL', reason: 'Bearish momentum — price below key averages, negative MACD' };
+            return { signal: 'HOLD', reason: 'Mixed signals — wait for clearer trend confirmation' };
+        }
+
+        // ── Polymarket predictions based on indicators ──
+        function getPolymarketPredictions(price, ind) {
+            const { signal } = getSignal(price, ind);
+            const bullish = signal === 'BUY';
+            const bearish = signal === 'SELL';
+
+            const roundUp = (n, step) => Math.ceil(n / step) * step;
+            const roundDown = (n, step) => Math.floor(n / step) * step;
+
+            const above5k = roundUp(price + 5000, 5000);
+            const below5k = roundDown(price - 5000, 5000);
+            const above10k = roundUp(price + 10000, 10000);
+            const ath = 110000; // approximate ATH area
+
+            return [
+                {
+                    q: `Bitcoin above $${fmtK(above5k)} this month?`,
+                    verdict: bullish ? 'YES' : bearish ? 'NO' : 'MAYBE',
+                    reason: bullish ? 'Momentum supports upside' : bearish ? 'Bearish trend makes this unlikely' : 'Unclear direction'
+                },
+                {
+                    q: `Bitcoin below $${fmtK(below5k)} this month?`,
+                    verdict: bearish ? 'YES' : bullish ? 'NO' : 'MAYBE',
+                    reason: bearish ? 'Downtrend may continue' : bullish ? 'Buying pressure should hold price' : 'Could go either way'
+                },
+                {
+                    q: `Bitcoin above $${fmtK(above10k)} by end of quarter?`,
+                    verdict: bullish && ind.rsi < 60 ? 'YES' : 'MAYBE',
+                    reason: bullish && ind.rsi < 60 ? 'Room to run with bullish setup' : 'Needs sustained momentum'
+                },
+                {
+                    q: `Bitcoin new all-time high (above $${fmtK(ath)}) this quarter?`,
+                    verdict: bullish && price > ath * 0.9 ? 'YES' : price > ath * 0.8 ? 'MAYBE' : 'NO',
+                    reason: price > ath * 0.9 ? 'Close to ATH with momentum' : 'Too far from ATH currently'
+                }
+            ];
+        }
+
+        // ── Render functions ──
+        function renderPrice(price, prevPrice) {
+            const el = document.getElementById('live-price');
+            const color = !prevPrice ? '#f0b90b' : price >= prevPrice ? '#3fb950' : '#f85149';
+            el.style.color = color;
+            el.textContent = `$${fmt(price)}`;
+        }
+
+        function renderSignal(price, ind) {
+            const { signal, reason } = getSignal(price, ind);
+            const el = document.getElementById('signal-banner');
+            el.className = 'signal-banner ' + (signal === 'BUY' ? 'signal-buy' : signal === 'SELL' ? 'signal-sell' : 'signal-neutral');
+            el.innerHTML = `${signal === 'BUY' ? 'BUY' : signal === 'SELL' ? 'SELL' : 'HOLD'} SIGNAL &mdash; ${reason}`;
+        }
+
+        function renderIndicators(ind) {
+            const el = document.getElementById('indicators');
+            el.innerHTML = `
+                <div class="indicator">
+                    <div class="indicator-label">RSI (14)</div>
+                    <div class="indicator-value" style="color:${ind.rsi > 70 ? '#f85149' : ind.rsi < 30 ? '#3fb950' : '#e6edf3'}">${ind.rsi.toFixed(1)}</div>
+                </div>
+                <div class="indicator">
+                    <div class="indicator-label">MACD</div>
+                    <div class="indicator-value" style="color:${ind.macd > 0 ? '#3fb950' : '#f85149'}">${ind.macd.toFixed(2)}</div>
+                </div>
+                <div class="indicator">
+                    <div class="indicator-label">SMA 20</div>
+                    <div class="indicator-value">$${fmt(ind.sma20)}</div>
+                </div>
+                <div class="indicator">
+                    <div class="indicator-label">SMA 50</div>
+                    <div class="indicator-value">$${fmt(ind.sma50)}</div>
+                </div>
+                <div class="indicator">
+                    <div class="indicator-label">Volatility</div>
+                    <div class="indicator-value">${ind.volatility.toFixed(2)}%</div>
+                </div>
+                <div class="indicator">
+                    <div class="indicator-label">24h Volume</div>
+                    <div class="indicator-value">${ind.vol24h.toFixed(0)} BTC</div>
+                </div>
+            `;
+        }
+
+        function renderPriceLevels(price, ind) {
+            const el = document.getElementById('price-levels');
+            const levels = [
+                { label: 'Resistance (24h High)', value: ind.resistance },
+                { label: 'SMA 20', value: ind.sma20 },
+                { label: 'SMA 50', value: ind.sma50 },
+                { label: 'Support (24h Low)', value: ind.support },
+            ];
+            el.innerHTML = levels.map(l => {
+                const cls = price >= l.value ? 'price-above' : 'price-below';
+                const tag = price >= l.value ? 'ABOVE' : 'BELOW';
+                return `<div class="level-row">
+                    <span class="level-label">${l.label}</span>
+                    <span class="level-value ${cls}">$${fmt(l.value)} (${tag})</span>
+                </div>`;
+            }).join('');
+        }
+
+        function renderBigTrades(trades) {
+            const el = document.getElementById('big-trades');
+            if (!trades.length) { el.innerHTML = '<div class="loading">No large trades detected yet</div>'; return; }
+            el.innerHTML = `<table class="trade-table">
+                <tr><th>Side</th><th>Price</th><th>BTC</th><th>Value</th><th>Time</th></tr>
+                ${trades.map(t => `<tr class="${t.side === 'BUY' ? 'buy-row' : 'sell-row'}">
+                    <td>${t.side}</td>
+                    <td>$${fmt(t.price)}</td>
+                    <td>${t.qty.toFixed(4)}</td>
+                    <td>$${fmtK(t.usd)}</td>
+                    <td>${t.time.toLocaleTimeString()}</td>
+                </tr>`).join('')}
+            </table>`;
+        }
+
+        function renderPolymarket(price, ind) {
+            const preds = getPolymarketPredictions(price, ind);
+            const el = document.getElementById('polymarket');
+            el.innerHTML = preds.map(p => {
+                const cls = p.verdict === 'YES' ? 'verdict-yes' : p.verdict === 'NO' ? 'verdict-no' : 'verdict-maybe';
+                return `<div class="poly-row">
+                    <div class="poly-question">
+                        <div>${p.q}</div>
+                        <div style="font-size:12px;color:#8b949e;margin-top:2px">${p.reason}</div>
+                    </div>
+                    <div class="poly-verdict ${cls}">${p.verdict === 'YES' ? 'BUY YES' : p.verdict === 'NO' ? 'BUY NO' : 'SKIP'}</div>
+                </div>`;
+            }).join('');
+        }
+
+        function renderUpdated() {
+            document.getElementById('last-updated').textContent = `Last updated: ${new Date().toLocaleTimeString()} — Data from Binance | Not financial advice`;
+        }
+
+        // ── Main update loop ──
+        async function update() {
+            try {
+                const [k, trades] = await Promise.all([fetchKlines(), fetchRecentTrades()]);
+                const ind = computeIndicators(k);
+                const price = currentPrice || parseFloat(k[k.length - 1][4]);
+                if (!currentPrice) currentPrice = price;
+
+                renderSignal(price, ind);
+                renderIndicators(ind);
+                renderPriceLevels(price, ind);
+                renderBigTrades(trades);
+                renderPolymarket(price, ind);
+                renderUpdated();
+            } catch (e) {
+                console.error('Update failed:', e);
+            }
+        }
+
+        // ── WebSocket for live price ──
+        function connectWS() {
+            const ws = new WebSocket(BINANCE_WS);
+            let prevPrice = null;
+
+            ws.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                prevPrice = currentPrice;
+                currentPrice = parseFloat(data.p);
+                renderPrice(currentPrice, prevPrice);
+            };
+
+            ws.onclose = () => setTimeout(connectWS, 3000);
+            ws.onerror = () => ws.close();
+        }
+
+        // ── Init ──
+        update();
+        connectWS();
+        setInterval(update, REFRESH_MS);
+    </script>
+</body>
+</html>
